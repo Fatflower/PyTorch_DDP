@@ -1,3 +1,24 @@
+# %Header File Start-----------------------------------------------------------
+#  Confidential（Unclassified）
+#  COPYRIGHT (C) Sun Yat-sen University
+#  THIS FILE MAY NOT BE MODIFIED OR REDISTRIBUTED WITHOUT THE
+#  EXPRESSED WRITTEN CONSENT OF SYSU
+# 
+# %-----------------------------------------------------------------------------
+#  Title   : DDP_test_data.py
+#  Author  : Zhang wentao; 
+#  E-mail  : z1282429194@163.com
+#  Created : 10/14/2021
+#  Description: An example of DistributedDataParallel training under the pytorch
+#               framework. This example contains how to load data and models, 
+#               and save the model. The main reference for this: https://zhuanlan.zhihu.com/p/419833524
+# %-----------------------------------------------------------------------------
+#  Modification History:
+#  V1.0: 2021.10.14, first created by Zhang wentao
+#
+# %Header File End--------------------------------------------------------------
+
+
 import os
 import torch
 import torch.distributed as dist
@@ -52,13 +73,18 @@ def run(rank, world_size):
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler)
 
-
+    # load model
     model = ResNet_refine('resnet18', False, 10).to(rank)
+    # Replace the BN in the model
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model).to(rank)
+
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
     start_epoch = 0
+    # Determine whether to load checkpoint
+    # resume = 0 : load checkpoint
+    # resume = 1 : don't load checkpoint
     resume = 0
     if resume == 0:
         print('resuming from checkpoint...')
@@ -70,6 +96,7 @@ def run(rank, world_size):
 
     best_acc = 0
     best_Epoch = 0
+    # set total epoch
     total_epoch = 3
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
@@ -163,14 +190,9 @@ def run_demo(demo_fn, world_size):
 
 
 if __name__ == "__main__":
-    # 指定使用的显卡
+    # Specify the GPU used
     os.environ['CUDA_VISIBLE_DEVICES'] ='0,2,3'
     n_gpus = torch.cuda.device_count()
     assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
     world_size = n_gpus
     run_demo(run, world_size)
-
-    # mp.spawn(run,
-    #          args=(world_size,),
-    #          nprocs=world_size,
-    #          join=True)
