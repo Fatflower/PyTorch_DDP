@@ -27,9 +27,18 @@ import torch.optim as optim
 import torch.multiprocessing as mp
 from torchvision.datasets import CIFAR10
 import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
 from Resnet_refine import ResNet_refine
 
 from torch.nn.parallel import DistributedDataParallel as DDP
+from apex import amp # install apex reference: https://blog.csdn.net/Orientliu96/article/details/104583998
+from prefetch_generator import BackgroundGenerator # pip install prefetch_generator
+
+
+class DataLoaderX(DataLoader):
+    """(加速组件) 重新封装Dataloader，使prefetch不用等待整个iteration完成"""
+    def __iter__(self):
+        return BackgroundGenerator(super().__iter__())
 
 
 def setup(rank, world_size):
@@ -56,10 +65,12 @@ def run(rank, world_size):
     model = ResNet_refine('resnet18', False, 10).to(rank)
     # Replace the BN in the model
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model).to(rank)
-
-    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True) #  
     optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
+    model, optimizer = amp.initialize(model, optimizer, opt_level='O1') # 这里是“欧一”，不是“零一”
+
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True) #  
+    
     start_epoch = 0
     # Determine whether to load checkpoint
     # resume = 0 : load checkpoint
@@ -90,18 +101,20 @@ def run(rank, world_size):
     batch_size = 256
     train_dataset = CIFAR10(root='/home/disk2/hulai/Datasets/CIFAR10', train=True, download=True, transform = transform_train)
     train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler)
+    train_loader = DataLoaderX(train_dataset, batch_size=batch_size, shuffle=(train_sampler is None),
+                                              pin_memory=True, num_workers=4, sampler=train_sampler)
 
     test_dataset = CIFAR10(root='/home/disk2/hulai/Datasets/CIFAR10', train=False, download=True, transform = transform_test)
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
-    test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler)
+    test_loader = DataLoaderX(test_dataset, batch_size=batch_size, shuffle=False,
+                                              pin_memory=True, num_workers=4, sampler=test_sampler)
 
 
 
     best_acc = 0
     best_Epoch = 0
     # set total epoch
-    total_epoch = 3
+    total_epoch = 300
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
@@ -116,8 +129,11 @@ def run(rank, world_size):
             output = model(data)
             loss = criterion(output, target)
             
+            # backward
             optimizer.zero_grad()
-            loss.backward()
+            with amp.scale_loss(loss, optimizer) as scaled_loss:
+                scaled_loss.backward()
+
             optimizer.step()
 
             total_loss += loss.item()
@@ -147,10 +163,8 @@ def run(rank, world_size):
             output = model(data)
             loss = criterion(output, target)
             
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
 
+            
             total_test_loss += loss.item()
             _, predicted = output.max(1)
 
