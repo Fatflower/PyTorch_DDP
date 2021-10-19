@@ -33,8 +33,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_ADDR'] = '127.0.0.110'
+    os.environ['MASTER_PORT'] = '30000'
 
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
@@ -49,6 +49,29 @@ def run(rank, world_size):
     torch.cuda.manual_seed_all(18)
     torch.backends.cudnn.deterministic = True
     torch.cuda.set_device(rank) # 这里设置 device ，后面可以直接使用 data.cuda(),否则需要指定 rank
+
+
+
+    # load model
+    model = ResNet_refine('resnet18', False, 10).to(rank)
+    # Replace the BN in the model
+    model = nn.SyncBatchNorm.convert_sync_batchnorm(model).to(rank)
+
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True) #  
+    optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9, weight_decay=5e-4)
+    criterion = nn.CrossEntropyLoss()
+    start_epoch = 0
+    # Determine whether to load checkpoint
+    # resume = 0 : load checkpoint
+    # resume = 1 : don't load checkpoint
+    resume = 0
+    if resume == 0:
+        print('resuming from checkpoint...')
+        checkpoint = torch.load('./checkpoint/resnet_cifar10_checkpoint.pth', map_location='cuda:{}'.format(rank))
+        model.load_state_dict(checkpoint['model'])
+        best_acc = checkpoint['acc']
+        start_epoch = checkpoint['epoch']
+        optimizer.load_state_dict(checkpoint['optimizer'])
 
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
@@ -73,26 +96,7 @@ def run(rank, world_size):
     test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler)
 
-    # load model
-    model = ResNet_refine('resnet18', False, 10).to(rank)
-    # Replace the BN in the model
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model).to(rank)
 
-    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
-    optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9, weight_decay=5e-4)
-    criterion = nn.CrossEntropyLoss()
-    start_epoch = 0
-    # Determine whether to load checkpoint
-    # resume = 0 : load checkpoint
-    # resume = 1 : don't load checkpoint
-    resume = 0
-    if resume == 0:
-        print('resuming from checkpoint...')
-        checkpoint = torch.load('./checkpoint/resnet_cifar10_checkpoint.pth')
-        model.load_state_dict(checkpoint['model'])
-        best_acc = checkpoint['acc']
-        start_epoch = checkpoint['epoch']
-        optimizer.load_state_dict(checkpoint['optimizer'])
 
     best_acc = 0
     best_Epoch = 0
@@ -164,7 +168,7 @@ def run(rank, world_size):
         # checkpoint
         acc = 100.*correct_test/total_test
         print('Epoch = {} : Acc = {}'.format(epoch, acc))
-        if (acc > best_acc) & (rank == 0):
+        if (acc > best_acc) & (rank % world_size == 0):
             print('Saving model ...')
             state = {
                 'model': model.state_dict(),
@@ -172,8 +176,8 @@ def run(rank, world_size):
                 'epoch': epoch+1,
                 'optimizer': optimizer.state_dict()
             }
-            # if not os.path.isdir('checkpoint'):
-            #     os.mkdir('checkpoint')
+            if not os.path.isdir('checkpoint1'):
+                os.mkdir('checkpoint1')
             torch.save(state, './checkpoint/resnet_cifar10_checkpoint.pth')
             best_acc = acc
             best_Epoch = epoch
@@ -191,7 +195,7 @@ def run_demo(demo_fn, world_size):
 
 if __name__ == "__main__":
     # Specify the GPU used
-    os.environ['CUDA_VISIBLE_DEVICES'] ='0,2,3'
+    os.environ['CUDA_VISIBLE_DEVICES'] ='5,6,7'
     n_gpus = torch.cuda.device_count()
     assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
     world_size = n_gpus
