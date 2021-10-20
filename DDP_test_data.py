@@ -41,6 +41,19 @@ class DataLoaderX(DataLoader):
         return BackgroundGenerator(super().__iter__())
 
 
+def reduce_tensor(tensor, world_size):
+    # 用于平均所有gpu上的运行结果，比如loss
+    # Reduces the tensor data across all machines
+    # Example: If we print the tensor, we can get:
+    # tensor(334.4330, device='cuda:1') *********************, here is cuda:  cuda:1
+    # tensor(359.1895, device='cuda:3') *********************, here is cuda:  cuda:3
+    # tensor(263.3543, device='cuda:2') *********************, here is cuda:  cuda:2
+    # tensor(340.1970, device='cuda:0') *********************, here is cuda:  cuda:0
+    rt = tensor.clone()
+    dist.all_reduce(rt, op=dist.reduce_op.SUM)
+    rt /= world_size
+    return rt
+
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = '127.0.0.110'
     os.environ['MASTER_PORT'] = '30000'
@@ -64,9 +77,10 @@ def run(rank, world_size):
     # load model
     model = ResNet_refine('resnet18', False, 10).to(rank)
     # Replace the BN in the model
-    model = nn.SyncBatchNorm.convert_sync_batchnorm(model).to(rank)
+    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     optimizer = optim.SGD(model.parameters(),lr=0.01, momentum=0.9, weight_decay=5e-4)
     criterion = nn.CrossEntropyLoss()
+    # amp.initialize 将模型和优化器为了进行后续混合精度训练而进行封装。注意，在调用 amp.initialize 之前，模型模型必须已经部署在GPU上。
     model, optimizer = amp.initialize(model, optimizer, opt_level='O1') # 这里是“欧一”，不是“零一”
 
     model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True) #  
@@ -114,13 +128,14 @@ def run(rank, world_size):
     best_acc = 0
     best_Epoch = 0
     # set total epoch
-    total_epoch = 300
+    total_epoch = 3
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
         total_loss = 0
         total = 0
-        correct = 0
+        # correct = 0
+        correct = torch.zeros(1).to(rank)
         train_sampler.set_epoch(epoch)
         for batch_idx, (data, target) in enumerate(train_loader):
             data = data.to(rank)
@@ -136,21 +151,28 @@ def run(rank, world_size):
 
             optimizer.step()
 
-            total_loss += loss.item()
+            reduced_loss = reduce_tensor(loss.data, world_size)
+
+
+
+            # total_loss += loss.item()
+            total_loss += reduced_loss.item()
             _, predicted = output.max(1)
 
             total += target.size(0)
             correct += predicted.eq(target).sum().item()
+            reduced_correct = reduce_tensor(correct, world_size)
 
             training_loss = (total_loss/(batch_idx+1))
-            training_acc  = (correct/total)
+            training_acc  = (reduced_correct/total).item()
 
 
             if batch_idx % 10 == 0:
+            # if rank == 0 & batch_idx % 10 == 0:
                 print('<===== Train =====> Epoch: [{}/{}]    training_loss = {:8.5f}    training_clean_acc = {:8.5f} \
                     training_batchsize = {}'.format(epoch, end_epoch-1, training_loss, training_acc, batch_size))
 
-
+        dist.barrier()
         model.eval()
         total_test_loss = 0
         total_test = 0
@@ -171,14 +193,14 @@ def run(rank, world_size):
             total_test += target.size(0)
             correct_test += predicted.eq(target).sum().item()
 
-            test_loss = (total_loss/(batch_idx+1))
+            test_loss = (total_test_loss/(batch_idx+1))
             test_acc  = (correct_test/total_test)
 
 
-            if batch_idx % 10 == 0:
+            if rank == 0 & batch_idx % 10 == 0:
                 print('<===== Test =====> Epoch: [{}/{}]    test_loss = {:8.5f}    test_clean_acc = {:8.5f} \
                     test_batchsize = {}'.format(epoch, end_epoch-1, test_loss, test_acc, batch_size))
-        
+        dist.barrier()
         # checkpoint
         acc = 100.*correct_test/total_test
         print('Epoch = {} : Acc = {}'.format(epoch, acc))
@@ -197,6 +219,7 @@ def run(rank, world_size):
             best_Epoch = epoch
         if (rank == 0) & (epoch == total_epoch-1) :
             print("The accuracy at Epoch {} is best accuracy: {}".format(best_Epoch, best_acc))
+        dist.barrier()
     cleanup()    
 
 def run_demo(demo_fn, world_size):
