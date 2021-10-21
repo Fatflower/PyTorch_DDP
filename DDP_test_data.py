@@ -128,7 +128,7 @@ def run(rank, world_size):
     best_acc = 0
     best_Epoch = 0
     # set total epoch
-    total_epoch = 2
+    total_epoch = 4
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
