@@ -128,7 +128,7 @@ def run(rank, world_size):
     best_acc = 0
     best_Epoch = 0
     # set total epoch
-    total_epoch = 3
+    total_epoch = 2
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
@@ -172,7 +172,7 @@ def run(rank, world_size):
                 print('<===== Train =====> Epoch: [{}/{}]    training_loss = {:8.5f}    training_clean_acc = {:8.5f} \
                     training_batchsize = {}'.format(epoch, end_epoch-1, training_loss, training_acc, batch_size))
 
-        dist.barrier()
+        # dist.barrier()
         model.eval()
         total_test_loss = 0
         total_test = 0
@@ -219,7 +219,7 @@ def run(rank, world_size):
             best_Epoch = epoch
         if (rank == 0) & (epoch == total_epoch-1) :
             print("The accuracy at Epoch {} is best accuracy: {}".format(best_Epoch, best_acc))
-        dist.barrier()
+        # dist.barrier()
     cleanup()    
 
 def run_demo(demo_fn, world_size):
