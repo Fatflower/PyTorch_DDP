@@ -92,7 +92,8 @@ def run(rank, world_size):
     resume = 0
     if resume == 0:
         print('resuming from checkpoint...')
-        checkpoint = torch.load('./checkpoint/resnet_cifar10_checkpoint.pth', map_location='cuda:{}'.format(rank))
+        #reference :https://github.com/pytorch/pytorch/issues/23138
+        checkpoint = torch.load('./checkpoint/resnet_cifar10_checkpoint.pth', map_location='cuda:{}'.format(rank)) 
         model.load_state_dict(checkpoint['model'])
         best_acc = checkpoint['acc']
         start_epoch = checkpoint['epoch']
@@ -128,7 +129,7 @@ def run(rank, world_size):
     best_acc = 0
     best_Epoch = 0
     # set total epoch
-    total_epoch = 4
+    total_epoch = 2
     end_epoch = start_epoch + total_epoch
     for epoch in range(start_epoch, end_epoch):
         model.train()
@@ -172,7 +173,7 @@ def run(rank, world_size):
                 print('<===== Train =====> Epoch: [{}/{}]    training_loss = {:8.5f}    training_clean_acc = {:8.5f} \
                     training_batchsize = {}'.format(epoch, end_epoch-1, training_loss, training_acc, batch_size))
 
-        # dist.barrier()
+        dist.barrier()
         model.eval()
         total_test_loss = 0
         total_test = 0
